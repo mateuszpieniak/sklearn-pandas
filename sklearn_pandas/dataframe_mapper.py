@@ -1,5 +1,6 @@
 import sys
 import contextlib
+import re
 
 import pandas as pd
 import numpy as np
@@ -114,21 +115,7 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
         if (df_out and (sparse or default)):
             raise ValueError("Can not use df_out with sparse or default")
 
-    @property
-    def _selected_columns(self):
-        """
-        Return a set of selected columns in the feature list.
-        """
-        selected_columns = set()
-        for feature in self.features:
-            columns = feature[0]
-            if isinstance(columns, list):
-                selected_columns = selected_columns.union(set(columns))
-            else:
-                selected_columns.add(columns)
-        return selected_columns
-
-    def _unselected_columns(self, X):
+    def _unselected_columns(self, X, selected_cols):
         """
         Return list of columns present in X and not selected explicitly in the
         mapper.
@@ -139,7 +126,7 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
         """
         X_columns = list(X.columns)
         return [column for column in X_columns if
-                column not in self._selected_columns]
+                column not in selected_cols]
 
     def __setstate__(self, state):
         # compatibility for older versions of sklearn-pandas
@@ -152,7 +139,7 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
         self.built_default = state.get('built_default', self.default)
         self.transformed_names_ = state.get('transformed_names_', [])
 
-    def _get_col_subset(self, X, cols, input_df=False):
+    def _get_col_subset(self, X, cols, input_df=False, return_cols=False):
         """
         Get a subset of columns from the given table X.
 
@@ -162,32 +149,42 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
 
         Returns a numpy array with the data from the selected columns
         """
+
         if isinstance(cols, string_types):
-            return_vector = True
+            expected_return_vector = True
             cols = [cols]
         else:
-            return_vector = False
+            expected_return_vector = False
+
+        # Only valuable regex expression is ASCII, _, numbers
+        escaped_cols = list(map(lambda col: re.escape(col), cols))
+        regex = "|".join(escaped_cols)
 
         # Needed when using the cross-validation compatibility
         # layer for sklearn<0.16.0.
         # Will be dropped on sklearn-pandas 2.0.
         if isinstance(X, list):
-            X = [x[cols] for x in X]
+            X = [x for x in X]
             X = pd.DataFrame(X)
-
         elif isinstance(X, DataWrapper):
             X = X.df  # fetch underlying data
 
-        if return_vector:
-            t = X[cols[0]]
-        else:
-            t = X[cols]
+        # Filter out columns by regex
+        X = X.filter(regex=regex)
+        transformer_input_cols = list(X.columns)
+
+        # If vector is expected and regex didn't extend string to list,
+        # then return vector
+        if expected_return_vector and X.shape[1] == 1:
+            X = X.iloc[:, 0]
 
         # return either a DataFrame/Series or a numpy array
-        if input_df:
-            return t
+        X = X if input_df else X.values
+
+        if return_cols:
+            return X, transformer_input_cols
         else:
-            return t.values
+            return X
 
     def fit(self, X, y=None):
         """
@@ -205,17 +202,23 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
 
         self.built_default = _build_transformer(self.default)
 
+        selected_cols = set()
         for columns, transformers, options in self.built_features:
             input_df = options.get('input_df', self.input_df)
 
+            Xt, input_transformer_cols = self._get_col_subset(
+                X, columns, input_df, True
+            )
+
+            selected_cols.update(input_transformer_cols)
+
             if transformers is not None:
-                with add_column_names_to_exception(columns):
-                    Xt = self._get_col_subset(X, columns, input_df)
+                with add_column_names_to_exception(input_transformer_cols):
                     _call_fit(transformers.fit, Xt, y)
 
         # handle features not explicitly selected
         if self.built_default:  # not False and not None
-            unsel_cols = self._unselected_columns(X)
+            unsel_cols = self._unselected_columns(X, selected_cols)
             with add_column_names_to_exception(unsel_cols):
                 Xt = self._get_col_subset(X, unsel_cols, self.input_df)
                 _call_fit(self.built_default.fit, Xt, y)
@@ -232,6 +235,8 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
         """
         if alias is not None:
             name = alias
+        elif transformer is None:
+            return columns
         elif isinstance(columns, list):
             name = '_'.join(columns)
         else:
@@ -267,25 +272,30 @@ class DataFrameMapper(BaseEstimator, TransformerMixin):
         X       the data to transform
         """
         extracted = []
+        selected_cols = set()
         self.transformed_names_ = []
         for columns, transformers, options in self.built_features:
             input_df = options.get('input_df', self.input_df)
             # columns could be a string or list of
             # strings; we don't care because pandas
             # will handle either.
-            Xt = self._get_col_subset(X, columns, input_df)
+            Xt, input_transformer_cols = self._get_col_subset(
+                X, columns, input_df, True
+            )
+            selected_cols.update(input_transformer_cols)
+
             if transformers is not None:
-                with add_column_names_to_exception(columns):
+                with add_column_names_to_exception(input_transformer_cols):
                     Xt = transformers.transform(Xt)
             extracted.append(_handle_feature(Xt))
 
             alias = options.get('alias')
             self.transformed_names_ += self.get_names(
-                columns, transformers, Xt, alias)
+                input_transformer_cols, transformers, Xt, alias)
 
         # handle features not explicitly selected
         if self.built_default is not False:
-            unsel_cols = self._unselected_columns(X)
+            unsel_cols = self._unselected_columns(X, selected_cols)
             Xt = self._get_col_subset(X, unsel_cols, self.input_df)
             if self.built_default is not None:
                 with add_column_names_to_exception(unsel_cols):
