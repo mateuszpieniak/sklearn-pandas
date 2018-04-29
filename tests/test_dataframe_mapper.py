@@ -448,8 +448,8 @@ def test_nonexistent_columns_explicit_fail(simple_dataframe):
     If a nonexistent column is selected, KeyError is raised.
     """
     mapper = DataFrameMapper(None)
-    with pytest.raises(KeyError):
-        mapper._get_col_subset(simple_dataframe, ['nonexistent_feature'])
+    array = mapper._get_col_subset(simple_dataframe, ['nonexistent_feature'])
+    assert array.size == 0
 
 
 def test_get_col_subset_single_column_array(simple_dataframe):
@@ -531,31 +531,6 @@ def test_build_transformers():
     assert isinstance(pipeline, Pipeline)
     for ix, transformer in enumerate(transformers):
         assert pipeline.steps[ix][1] == transformer
-
-
-def test_selected_columns():
-    """
-    selected_columns returns a set of the columns appearing in the features
-    of the mapper.
-    """
-    mapper = DataFrameMapper([
-        ('a', None),
-        (['a', 'b'], None)
-    ])
-    assert mapper._selected_columns == {'a', 'b'}
-
-
-def test_unselected_columns():
-    """
-    selected_columns returns a list of the columns not appearing in the
-    features of the mapper but present in the given dataframe.
-    """
-    df = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
-    mapper = DataFrameMapper([
-        ('a', None),
-        (['a', 'b'], None)
-    ])
-    assert 'c' in mapper._unselected_columns(df)
 
 
 def test_default_false():
@@ -829,3 +804,21 @@ def test_direct_cross_validation(iris_dataframe):
     scores = sklearn_cv_score(pipeline, data, labels)
     assert scores.mean() > 0.96
     assert (scores.std() * 2) < 0.04
+
+
+def test_regex_col_selector(complex_dataframe):
+    mapper = DataFrameMapper([("feat", None)])
+    mapper.fit_transform(complex_dataframe)
+    assert mapper.transformed_names_ == ["feat1", "feat2"]
+
+
+def test_multiple_col_selector_for_none(complex_dataframe):
+    mapper = DataFrameMapper([(["feat1", "feat2"], None)])
+    mapper.fit_transform(complex_dataframe)
+    assert mapper.transformed_names_ == ["feat1", "feat2"]
+
+
+def test_regex_col_selector_alias(complex_dataframe):
+    mapper = DataFrameMapper([("feat", None, {'alias': "new_feat"})])
+    mapper.fit_transform(complex_dataframe)
+    assert mapper.transformed_names_ == ["new_feat_0", "new_feat_1"]
